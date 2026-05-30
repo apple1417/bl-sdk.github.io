@@ -17,6 +17,7 @@ import zipfile
 from functools import cache
 from io import BytesIO
 from pathlib import Path
+from types import EllipsisType
 from typing import TYPE_CHECKING, Any, NewType, NoReturn
 from urllib.parse import unquote, urlparse
 
@@ -69,14 +70,15 @@ SCHEMA: Schema = {  # type: ignore
 }
 
 
-def parse_front_matter(path: Path) -> tuple[Url | None, Url | None]:
+def parse_front_matter(path: Path) -> tuple[Url | EllipsisType | None, Url | None]:
     """
     Parses jekyll front matter, extracting the pyproject url and possibly an explicit download url.
 
     Args:
         path: Path to the file to parse:
     Returns:
-        A tuple of the pyproject url and download url, both None if not found.
+        A tuple of the pyproject url and download url, both None if not found. The pyproject url may
+        also be Ellipsis, if this is a legacy mod which doesn't have one.
     """
     try:
         with path.open() as file:
@@ -87,7 +89,7 @@ def parse_front_matter(path: Path) -> tuple[Url | None, Url | None]:
             url = front_matter.get("pyproject_url")
             if url is None and front_matter.get("legacy", False):
                 # legacy mods are allowed to not have a url
-                return None, None
+                return ..., None
             assert isinstance(url, str)
 
             download = front_matter.get("download")
@@ -292,14 +294,19 @@ def get_git_changed_files() -> list[Path]:
     Returns:
         A list of changed files.
     """
-    root = Path(
-        subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            check=True,
-            encoding="utf8",
-            capture_output=True,
-        ).stdout.strip(),
+    proc = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        check=False,
+        encoding="utf8",
+        capture_output=True,
     )
+    if proc.returncode != 0:
+        # Seen some weird errors in CI, which didn't print any output, so do it ourselves
+        log.error(proc.stdout)
+        log.error(proc.stderr)
+        proc.check_returncode()
+
+    root = Path(proc.stdout.strip())
 
     changes = subprocess.run(
         ["git", "diff", "--merge-base", "origin/master", "--name-only"],
@@ -418,6 +425,11 @@ if __name__ == "__main__":
     for path in front_matter_files:
         url, download_url = parse_front_matter(path)
         if url is None:
+            continue
+        if url is ...:
+            # This was a legacy mod, don't include it in the count
+            log.info("Skipping legacy mod %s", path)
+            total_files -= 1
             continue
         urls.append((url, download_url))
 
